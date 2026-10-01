@@ -645,7 +645,11 @@ _HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0e0e1a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Yoga AI Coach</title>
 <style>
 :root{
@@ -767,6 +771,36 @@ textarea.ci:focus{border-color:var(--accent)}
 /* Waiting badge */
 .waiting-badge{display:inline-block;background:#2a2a0a;color:var(--warn);
   border:1px solid #4a4a10;border-radius:8px;padding:3px 8px;font-size:11px;margin-top:4px}
+
+/* Phone: stack devices strip → camera → chat */
+@media (max-width:760px){
+  body{height:100dvh}
+  .hdr{padding:8px 12px;padding-top:max(8px,env(safe-area-inset-top));gap:6px}
+  .hdr-title{font-size:14px;letter-spacing:1px;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  .hbtn{white-space:nowrap;flex-shrink:0}
+  .hdr-ip{display:none}
+  .hbtn{padding:7px 10px}
+  .body{flex-direction:column}
+  .sidebar{width:auto;flex-direction:row;align-items:stretch;border-right:none;
+    border-bottom:1px solid var(--border);padding:8px 12px;overflow-x:auto;overflow-y:hidden}
+  .sb-title,.col-title{display:none}
+  #devlist{display:flex;gap:6px}
+  .dev-item{min-width:140px;flex-shrink:0}
+  .dev-del{opacity:1;font-size:14px;padding:2px 4px;top:6px;right:6px}
+  .no-dev{padding:8px;white-space:nowrap}
+  .no-dev br{display:none}
+  .add-btn{width:auto;flex-shrink:0;margin:0;padding:8px 14px;white-space:nowrap}
+  .cam-col{width:auto;flex-direction:row;flex-wrap:wrap;border-right:none;
+    border-bottom:1px solid var(--border);padding:8px 12px;gap:8px}
+  #cam-img,.no-cam{max-height:32dvh;object-fit:contain;background:#09091a}
+  .no-cam{aspect-ratio:auto;height:90px}
+  .stat-box{flex:1;padding:7px 10px}
+  .chat-col{min-height:0;padding:8px 12px;padding-bottom:max(8px,env(safe-area-inset-bottom))}
+  .bub{font-size:14px}
+  textarea.ci,.fg input{font-size:16px}   /* <16px makes iOS zoom on focus */
+  .sbtn,.stopbtn{padding:11px 16px}
+  .mbtn{padding:10px 20px}
+}
 
 ::-webkit-scrollbar{width:3px}
 ::-webkit-scrollbar-track{background:transparent}
