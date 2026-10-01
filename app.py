@@ -27,22 +27,39 @@ _hello_registry = {}   # {machine_id: {ip, port, last_seen}}  — self-registere
 _sessions       = {}   # {session_id: {device_id, messages, asana, monitoring}}
 _state_lock     = threading.Lock()
 
-# Groq API key — set via GROQ_API_KEY env var (or update via Settings in the UI)
-_groq_key = os.environ.get("GROQ_API_KEY", "")
+# Gemini API key — set via GEMINI_API_KEY env var (or update via Settings in the UI)
+_gemini_key = os.environ.get("GEMINI_API_KEY", "")
 
-# Groq models — update here if Groq deprecates one
-VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"   # vision + text
-CHAT_MODEL   = "llama-3.1-8b-instant"                         # text-only chat
+# Gemini model — multimodal, so one model handles vision + chat. Update here if Google deprecates it.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+
+
+def _llm(messages, max_tokens, temperature) -> str:
+    """Gemini via its OpenAI-compatible endpoint."""
+    r = requests.post(
+        GEMINI_URL,
+        headers={"Authorization": f"Bearer {_gemini_key}"},
+        json={"model": GEMINI_MODEL, "messages": messages, "max_tokens": max_tokens,
+              "temperature": temperature, "reasoning_effort": "none"},
+        timeout=60,
+    )
+    d = r.json()
+    if isinstance(d, list):
+        d = d[0]
+    if r.status_code != 200:
+        raise RuntimeError(d.get("error", {}).get("message", r.text[:200]))
+    return d["choices"][0]["message"]["content"] or ""
 
 
 def _load():
-    global _devices, _groq_key
+    global _devices, _gemini_key
     if os.path.exists(_STATE_FILE):
         try:
             d = json.load(open(_STATE_FILE, encoding="utf-8"))
             _devices.update(d.get("devices", {}))
-            if d.get("groq_key"):          # user-updated key takes priority
-                _groq_key = d["groq_key"]
+            if d.get("gemini_key"):        # user-updated key takes priority
+                _gemini_key = d["gemini_key"]
         except Exception as e:
             print(f"[State] Load error: {e}")
 
@@ -50,7 +67,7 @@ def _load():
 def _save():
     try:
         with open(_STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"devices": _devices, "groq_key": _groq_key}, f, indent=2)
+            json.dump({"devices": _devices, "gemini_key": _gemini_key}, f, indent=2)
     except Exception as e:
         print(f"[State] Save error: {e}")
 
@@ -164,9 +181,6 @@ def _stop_monitoring():
 
 def _monitor_worker(sid: str, mid: str, asana: str, stop_evt: threading.Event):
     try:
-        from groq import Groq
-        groq = Groq(api_key=_groq_key)
-
         _speak(f"Starting {asana}. Please get into position in front of the camera.", mid)
         stop_evt.wait(3)
 
@@ -178,8 +192,7 @@ def _monitor_worker(sid: str, mid: str, asana: str, stop_evt: threading.Event):
 
             b64 = base64.b64encode(frame).decode()
             try:
-                resp = groq.chat.completions.create(
-                    model=VISION_MODEL,
+                correction = _llm(
                     messages=[{
                         "role": "user",
                         "content": [
@@ -195,8 +208,7 @@ def _monitor_worker(sid: str, mid: str, asana: str, stop_evt: threading.Event):
                     }],
                     max_tokens=100,
                     temperature=0.3,
-                )
-                correction = resp.choices[0].message.content.strip()
+                ).strip()
                 print(f"[Monitor] {correction[:80]}")
 
                 with _state_lock:
@@ -241,15 +253,15 @@ def api_device_hello():
 # ─── API: Settings ────────────────────────────────────────────────────────────
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
-    global _groq_key
+    global _gemini_key
     if request.method == "POST":
         d = request.get_json() or {}
-        if "groq_key" in d:
-            _groq_key = d["groq_key"].strip()
+        if "gemini_key" in d:
+            _gemini_key = d["gemini_key"].strip()
             _save()
         return jsonify({"ok": True})
-    partial = (_groq_key[:8] + "...") if len(_groq_key) > 8 else ""
-    return jsonify({"set": bool(_groq_key), "partial": partial})
+    partial = (_gemini_key[:8] + "...") if len(_gemini_key) > 8 else ""
+    return jsonify({"set": bool(_gemini_key), "partial": partial})
 
 
 # ─── API: Devices ─────────────────────────────────────────────────────────────
@@ -277,19 +289,22 @@ def api_devices_add():
     if not mid or not pw:
         return jsonify({"error": "Machine ID and password are required"}), 400
 
+    # Accept if device recently sent a hello OR is actively pushing frames
     hello = _hello_registry.get(mid)
-    if not hello:
+    has_frames = mid in _frame_cache
+    if not hello and not has_frames:
         return jsonify({
             "error": f"Device '{mid}' has not connected yet. "
                      f"Power on the ESP32 and wait a few seconds, then try again."
         }), 400
 
-    age = time.time() - hello["last_seen"]
-    if age > 300:
-        return jsonify({
-            "error": f"Device '{mid}' last seen {int(age/60)} min ago. "
-                     f"Restart the ESP32 so it reconnects."
-        }), 400
+    if hello:
+        age = time.time() - hello["last_seen"]
+        if age > 300 and not has_frames:
+            return jsonify({
+                "error": f"Device '{mid}' last seen {int(age/60)} min ago. "
+                         f"Restart the ESP32 so it reconnects."
+            }), 400
 
     _devices[mid] = {
         "name": nm, "pw_hash": _hash(pw),
@@ -320,7 +335,7 @@ def api_stream(mid):
             if frame and frame is not last:
                 last = frame
                 yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
-            time.sleep(0.1)
+            time.sleep(0.033)
 
     return Response(gen(), content_type="multipart/x-mixed-replace; boundary=frame",
                     headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"})
@@ -390,17 +405,11 @@ def api_chat_send(sid):
             "type": "chat", "ts": time.time()
         })
 
-    if not _groq_key:
-        reply = "Groq API key is not configured. Please set it in Settings."
+    if not _gemini_key:
+        reply = "Gemini API key is not configured. Please set it in Settings."
         session["messages"].append({"role": "assistant", "content": reply,
                                     "type": "chat", "ts": time.time()})
         return jsonify({"reply": reply})
-
-    try:
-        from groq import Groq
-        groq = Groq(api_key=_groq_key)
-    except ImportError:
-        return jsonify({"error": "groq package not installed. Run: pip install groq"}), 500
 
     # Capture a frame if device is connected — use vision model for every chat message
     frame_b64 = None
@@ -410,7 +419,6 @@ def api_chat_send(sid):
             frame_b64 = base64.b64encode(frame).decode()
 
     use_vision = frame_b64 is not None
-    model = VISION_MODEL if use_vision else CHAT_MODEL
 
     if use_vision:
         system = (
@@ -458,11 +466,7 @@ def api_chat_send(sid):
     # (text-only path: history already has the user message as plain text)
 
     try:
-        r = groq.chat.completions.create(
-            model=model, messages=history,
-            max_tokens=220, temperature=0.6
-        )
-        raw = r.choices[0].message.content.strip()
+        raw = _llm(history, max_tokens=220, temperature=0.6).strip()
 
         action = None
         try:
@@ -829,8 +833,8 @@ textarea.ci:focus{border-color:var(--accent)}
   <div class="modal">
     <h2>&#9881; Settings</h2>
     <div class="fg">
-      <label>Groq API Key</label>
-      <input type="password" id="gk" placeholder="gsk_...">
+      <label>Gemini API Key</label>
+      <input type="password" id="gk" placeholder="AIza... / AQ...">
     </div>
     <div class="minfo" id="kinfo"></div>
     <div class="mbtns">
@@ -927,7 +931,7 @@ function saveSettings(){
   const k = document.getElementById('gk').value.trim();
   if(!k) return;
   fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({groq_key:k})
+    body:JSON.stringify({gemini_key:k})
   }).then(()=>{ document.getElementById('gk').value=''; closeM('sm'); });
 }
 
@@ -1107,7 +1111,7 @@ if __name__ == "__main__":
     print(f"  Open in browser : http://localhost:8080")
     print(f"  Also reachable  : http://{ip}:8080")
     print()
-    print(f"  Groq API key    : {'SET' if _groq_key else 'NOT SET'}")
+    print(f"  Gemini API key  : {'SET' if _gemini_key else 'NOT SET'}")
     print(f"  Devices         : {len(_devices)} registered")
     print()
     print(f"  ESP32 config    : Set SERVER_IP = \"{ip}\" in main.cpp")
